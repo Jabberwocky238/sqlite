@@ -688,7 +688,7 @@ struct Pager {
   char *zJournal;             /* Name of the journal file */
   int (*xBusyHandler)(void*); /* Function to call when busy */
   void *pBusyHandlerArg;      /* Context argument for xBusyHandler */
-  u32 aStat[4];               /* Total cache hits, misses, writes, spills */
+  u32 aStat[5];               /* Cache hits, misses, writes, spills, undos */
 #ifdef SQLITE_TEST
   int nRead;                  /* Database pages read */
 #endif
@@ -714,6 +714,7 @@ struct Pager {
 #define PAGER_STAT_MISS  1
 #define PAGER_STAT_WRITE 2
 #define PAGER_STAT_SPILL 3
+#define PAGER_STAT_UNDO  4
 
 /*
 ** The following global variables hold counters used for
@@ -2477,6 +2478,9 @@ static int pager_playback_one_page(
     ** case it must be encrypted here before it is copied into the database
     ** file.  */
     rc = sqlite3OsWrite(pPager->fd, (u8 *)aData, pPager->pageSize, ofst);
+#ifndef SQLITE_OMIT_TRACE
+    pPager->aStat[PAGER_STAT_UNDO]++;
+#endif
 
     if( pgno>pPager->dbFileSize ){
       pPager->dbFileSize = pgno;
@@ -6974,6 +6978,22 @@ void sqlite3PagerCacheStat(Pager *pPager, int eStat, int reset, u64 *pnVal){
     pPager->aStat[eStat] = 0;
   }
 }
+
+#ifndef SQLITE_OMIT_TRACE
+/*
+** Before returning, *pnVal is incremented by the number of pages this pager
+** has written back to the database file while undoing a transaction or a
+** savepoint.  These writes are deliberately kept out of PAGER_STAT_WRITE,
+** which backs the public SQLITE_DBSTATUS_CACHE_WRITE counter, so that the
+** meaning of that counter does not change.
+*/
+void sqlite3PagerUndoStat(Pager *pPager, int reset, u64 *pnVal){
+  *pnVal += pPager->aStat[PAGER_STAT_UNDO];
+  if( reset ){
+    pPager->aStat[PAGER_STAT_UNDO] = 0;
+  }
+}
+#endif /* SQLITE_OMIT_TRACE */
 
 /*
 ** Return true if this is an in-memory or temp-file backed pager.

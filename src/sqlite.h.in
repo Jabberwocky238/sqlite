@@ -3622,8 +3622,17 @@ SQLITE_DEPRECATED void *sqlite3_profile(sqlite3*,
 ** together with the raw components from which it is derived.  The weights
 ** are the SQLITE_CU_WEIGHT_VMSTEP, SQLITE_CU_WEIGHT_PAGEREAD and
 ** SQLITE_CU_WEIGHT_PAGEWRITE compile-time options, so an application that
-** prefers a different cost model can recompute cu from nVmStep, nPageRead
-** and nPageWrite instead of using the cu field directly.
+** prefers a different cost model can recompute cu from nVmStep, nPageRead,
+** nPageWrite and nPageUndo instead of using the cu field directly.
+**
+** The nPageUndo count is the page write-backs performed to undo a change,
+** by a [ROLLBACK], by a rollback to a [SAVEPOINT], or by the automatic
+** rollback of a statement that failed.  Undoing a change is real work on
+** real pages, so these writes are charged at the same weight as any other,
+** but they are reported separately because they are the cost of taking
+** something back rather than the cost of doing it.  They are counted
+** separately inside the pager too, so the public
+** [SQLITE_DBSTATUS_CACHE_WRITE] counter keeps its existing meaning.
 **
 ** Storage is reported in bytes, in two flavors.  The "alloc" flavor counts
 ** every page in the database file, including pages sitting on the freelist.
@@ -3664,6 +3673,7 @@ struct sqlite3_meter {
   sqlite3_int64 nVmStep;       /* Virtual machine instructions executed */
   sqlite3_int64 nPageRead;     /* Pages read from disk */
   sqlite3_int64 nPageWrite;    /* Pages written to disk */
+  sqlite3_int64 nPageUndo;     /* Pages written back to undo a change */
   sqlite3_int64 suAlloc;       /* Allocated storage afterwards, in bytes */
   sqlite3_int64 suAllocDelta;  /* Change in allocated storage, may be <0 */
   sqlite3_int64 suLive;        /* Live storage afterwards, in bytes */

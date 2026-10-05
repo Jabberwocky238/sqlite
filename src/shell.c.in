@@ -5566,11 +5566,12 @@ static int sql_trace_callback(
       const sqlite3_meter *pM = (const sqlite3_meter*)pX;
       if( pM==0 ) break;
       cli_printf(p->traceOut, "%.*s;\n"
-                 "  -- cu %lld (vm %lld, read %lld, write %lld)\n"
+                 "  -- cu %lld (vm %lld, read %lld, write %lld, undo %lld)\n"
                  "  -- su live %+lld -> %lld, alloc %+lld -> %lld\n",
                  (int)nSql, zSql,
                  (sqlite3_int64)pM->cu, (sqlite3_int64)pM->nVmStep,
                  (sqlite3_int64)pM->nPageRead, (sqlite3_int64)pM->nPageWrite,
+                 (sqlite3_int64)pM->nPageUndo,
                  (sqlite3_int64)pM->suLiveDelta, (sqlite3_int64)pM->suLive,
                  (sqlite3_int64)pM->suAllocDelta, (sqlite3_int64)pM->suAlloc);
       break;

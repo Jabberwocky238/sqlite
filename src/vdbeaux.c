@@ -3318,20 +3318,28 @@ int sqlite3VdbeCheckFkDeferred(Vdbe *p){
 ** statements will attribute I/O to whichever statement happens to finish
 ** first.  Virtual machine instructions, counted per-Vdbe, are always exact.
 */
-static void vdbeMeterIoCounters(sqlite3 *db, i64 *pnRead, i64 *pnWrite){
+static void vdbeMeterIoCounters(
+  sqlite3 *db,
+  i64 *pnRead,
+  i64 *pnWrite,
+  i64 *pnUndo
+){
   u64 nRead = 0;
   u64 nWrite = 0;
+  u64 nUndo = 0;
   int i;
   for(i=0; i<db->nDb; i++){
     Btree *pBt = db->aDb[i].pBt;
+    Pager *pPager;
     if( pBt==0 ) continue;
-    sqlite3PagerCacheStat(sqlite3BtreePager(pBt),
-                          SQLITE_DBSTATUS_CACHE_MISS, 0, &nRead);
-    sqlite3PagerCacheStat(sqlite3BtreePager(pBt),
-                          SQLITE_DBSTATUS_CACHE_WRITE, 0, &nWrite);
+    pPager = sqlite3BtreePager(pBt);
+    sqlite3PagerCacheStat(pPager, SQLITE_DBSTATUS_CACHE_MISS, 0, &nRead);
+    sqlite3PagerCacheStat(pPager, SQLITE_DBSTATUS_CACHE_WRITE, 0, &nWrite);
+    sqlite3PagerUndoStat(pPager, 0, &nUndo);
   }
   *pnRead = (i64)nRead;
   *pnWrite = (i64)nWrite;
+  *pnUndo = (i64)nUndo;
 }
 
 /*
@@ -3339,12 +3347,13 @@ static void vdbeMeterIoCounters(sqlite3 *db, i64 *pnRead, i64 *pnWrite){
 ** sqlite3VdbeMeterFinish() subtracts to isolate this run's consumption.
 */
 void sqlite3VdbeMeterBegin(Vdbe *p){
-  i64 nRead, nWrite;
+  i64 nRead, nWrite, nUndo;
   memset(&p->meter, 0, sizeof(p->meter));
-  vdbeMeterIoCounters(p->db, &nRead, &nWrite);
+  vdbeMeterIoCounters(p->db, &nRead, &nWrite, &nUndo);
   p->aMeterBase[0] = (i64)p->aCounter[SQLITE_STMTSTATUS_VM_STEP];
   p->aMeterBase[1] = nRead;
   p->aMeterBase[2] = nWrite;
+  p->aMeterBase[3] = nUndo;
   p->bMeter = 1;
 }
 
@@ -3434,16 +3443,18 @@ void sqlite3MeterRollback(sqlite3 *db){
 void sqlite3VdbeMeterFinish(Vdbe *p){
   sqlite3 *db = p->db;
   sqlite3_meter *pMeter = &p->meter;
-  i64 nRead, nWrite;
+  i64 nRead, nWrite, nUndo;
   int i;
-  vdbeMeterIoCounters(db, &nRead, &nWrite);
+  vdbeMeterIoCounters(db, &nRead, &nWrite, &nUndo);
   pMeter->nVmStep = (i64)(u32)(p->aCounter[SQLITE_STMTSTATUS_VM_STEP]
                                  - (u32)p->aMeterBase[0]);
   pMeter->nPageRead = nRead - p->aMeterBase[1];
   pMeter->nPageWrite = nWrite - p->aMeterBase[2];
+  pMeter->nPageUndo = nUndo - p->aMeterBase[3];
   pMeter->cu = pMeter->nVmStep*SQLITE_CU_WEIGHT_VMSTEP
              + pMeter->nPageRead*SQLITE_CU_WEIGHT_PAGEREAD
-             + pMeter->nPageWrite*SQLITE_CU_WEIGHT_PAGEWRITE;
+             + (pMeter->nPageWrite + pMeter->nPageUndo)
+                 *SQLITE_CU_WEIGHT_PAGEWRITE;
   pMeter->suAllocDelta += db->suPendAlloc;
   pMeter->suLiveDelta += db->suPendLive;
   db->suPendAlloc = 0;

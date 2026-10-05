@@ -488,7 +488,7 @@ struct Vdbe {
   VList *pVList;          /* Name of variables */
 #ifndef SQLITE_OMIT_TRACE
   i64 startTime;          /* Time when query started - used for profiling */
-  i64 aMeterBase[3];      /* VM_STEP/page-read/page-write at start of run */
+  i64 aMeterBase[4];      /* VM_STEP/read/write/undo counts at run start */
   sqlite3_meter meter;    /* Resource usage accumulated during this run */
 #endif
 #ifdef SQLITE_DEBUG

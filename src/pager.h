@@ -233,6 +233,9 @@ const char *sqlite3PagerJournalname(Pager*);
 void *sqlite3PagerTempSpace(Pager*);
 int sqlite3PagerIsMemdb(Pager*);
 void sqlite3PagerCacheStat(Pager *, int, int, u64*);
+#ifndef SQLITE_OMIT_TRACE
+void sqlite3PagerUndoStat(Pager *, int, u64*);
+#endif
 void sqlite3PagerClearCache(Pager*);
 int sqlite3SectorSize(sqlite3_file *);
 
