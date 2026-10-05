@@ -3310,6 +3310,209 @@ int sqlite3VdbeCheckFkDeferred(Vdbe *p){
 }
 #endif
 
+#ifndef SQLITE_OMIT_TRACE
+/*
+** Accumulate the page-level I/O counters of every database attached to db
+** into *pnRead and *pnWrite.  These counters belong to the pager, not to any
+** one statement, so a connection that interleaves sqlite3_step() calls on two
+** statements will attribute I/O to whichever statement happens to finish
+** first.  Virtual machine instructions, counted per-Vdbe, are always exact.
+*/
+static void vdbeMeterIoCounters(sqlite3 *db, i64 *pnRead, i64 *pnWrite){
+  u64 nRead = 0;
+  u64 nWrite = 0;
+  int i;
+  for(i=0; i<db->nDb; i++){
+    Btree *pBt = db->aDb[i].pBt;
+    if( pBt==0 ) continue;
+    sqlite3PagerCacheStat(sqlite3BtreePager(pBt),
+                          SQLITE_DBSTATUS_CACHE_MISS, 0, &nRead);
+    sqlite3PagerCacheStat(sqlite3BtreePager(pBt),
+                          SQLITE_DBSTATUS_CACHE_WRITE, 0, &nWrite);
+  }
+  *pnRead = (i64)nRead;
+  *pnWrite = (i64)nWrite;
+}
+
+/*
+** Start metering a run of prepared statement p.  Records the baselines that
+** sqlite3VdbeMeterFinish() subtracts to isolate this run's consumption.
+*/
+void sqlite3VdbeMeterBegin(Vdbe *p){
+  i64 nRead, nWrite;
+  memset(&p->meter, 0, sizeof(p->meter));
+  vdbeMeterIoCounters(p->db, &nRead, &nWrite);
+  p->aMeterBase[0] = (i64)p->aCounter[SQLITE_STMTSTATUS_VM_STEP];
+  p->aMeterBase[1] = nRead;
+  p->aMeterBase[2] = nWrite;
+  p->bMeter = 1;
+}
+
+/*
+** Sample the storage consumed by every database in which p currently holds
+** an open transaction, folding the change since that database's previous
+** sample into p->meter.
+**
+** This must run while those transactions are still open, because
+** sqlite3BtreeGetMeta() requires page 1 of the database to be loaded.
+** sqlite3VdbeHalt(), before it commits or rolls back, is the last moment at
+** which that is guaranteed.
+*/
+void sqlite3VdbeMeterSampleStorage(Vdbe *p){
+  sqlite3 *db = p->db;
+  int i;
+  for(i=0; i<db->nDb; i++){
+    Db *pDb = &db->aDb[i];
+    i64 szPage, nPage, nFree, suAlloc, suLive;
+    u32 nFreeMeta = 0;
+    if( pDb->pBt==0 ) continue;
+    if( sqlite3BtreeTxnState(pDb->pBt)==SQLITE_TXN_NONE ) continue;
+    szPage = (i64)sqlite3BtreeGetPageSize(pDb->pBt);
+    nPage = (i64)sqlite3BtreeLastPage(pDb->pBt);
+    sqlite3BtreeGetMeta(pDb->pBt, BTREE_FREE_PAGE_COUNT, &nFreeMeta);
+    nFree = (i64)nFreeMeta;
+    if( nFree>nPage ) nFree = nPage;
+    suAlloc = nPage*szPage;
+    suLive = (nPage - nFree)*szPage;
+    if( pDb->bSuValid==0 ){
+      /* Nothing to compare against yet.  Adopt this sample as the baseline
+      ** and report no delta for it. */
+      pDb->suAllocTxn = suAlloc;
+      pDb->suLiveTxn = suLive;
+    }else{
+      /* The first sample taken inside a transaction records where that
+      ** transaction started, so that a rollback can hand back exactly what
+      ** the transaction had claimed. */
+      if( pDb->bSuTxnValid==0 ){
+        pDb->suAllocTxn = pDb->suAlloc;
+        pDb->suLiveTxn = pDb->suLive;
+      }
+      p->meter.suAllocDelta += suAlloc - pDb->suAlloc;
+      p->meter.suLiveDelta += suLive - pDb->suLive;
+    }
+    pDb->suAlloc = suAlloc;
+    pDb->suLive = suLive;
+    pDb->bSuValid = 1;
+    pDb->bSuTxnValid = 1;
+  }
+}
+
+/*
+** Give back the storage that a rolled-back transaction had been charged for.
+**
+** The storage sample for a statement is taken before the fate of its
+** transaction is known, so a statement that writes and is then rolled back
+** has already reported a delta that never became durable.  This emits the
+** compensating delta and winds the baselines back to where the transaction
+** started.  The compensation is parked on the connection rather than applied
+** directly, because the rollback can happen deep inside sqlite3VdbeHalt(),
+** below the point where the reporting statement is known; the next call to
+** sqlite3VdbeMeterFinish() picks it up.
+**
+** Compute consumption is deliberately not given back.  A rolled-back
+** statement burns just as many virtual machine instructions and just as much
+** page I/O as one that commits.
+*/
+void sqlite3MeterRollback(sqlite3 *db){
+  int i;
+  for(i=0; i<db->nDb; i++){
+    Db *pDb = &db->aDb[i];
+    if( pDb->bSuTxnValid==0 ) continue;
+    db->suPendAlloc += pDb->suAllocTxn - pDb->suAlloc;
+    db->suPendLive += pDb->suLiveTxn - pDb->suLive;
+    pDb->suAlloc = pDb->suAllocTxn;
+    pDb->suLive = pDb->suLiveTxn;
+    pDb->bSuTxnValid = 0;
+  }
+}
+
+/*
+** Complete the metering report for a run of p.  Storage totals are summed
+** from the per-database baselines rather than re-read, so that databases the
+** statement never opened still contribute their last known size.
+*/
+void sqlite3VdbeMeterFinish(Vdbe *p){
+  sqlite3 *db = p->db;
+  sqlite3_meter *pMeter = &p->meter;
+  i64 nRead, nWrite;
+  int i;
+  vdbeMeterIoCounters(db, &nRead, &nWrite);
+  pMeter->nVmStep = (i64)(u32)(p->aCounter[SQLITE_STMTSTATUS_VM_STEP]
+                                 - (u32)p->aMeterBase[0]);
+  pMeter->nPageRead = nRead - p->aMeterBase[1];
+  pMeter->nPageWrite = nWrite - p->aMeterBase[2];
+  pMeter->cu = pMeter->nVmStep*SQLITE_CU_WEIGHT_VMSTEP
+             + pMeter->nPageRead*SQLITE_CU_WEIGHT_PAGEREAD
+             + pMeter->nPageWrite*SQLITE_CU_WEIGHT_PAGEWRITE;
+  pMeter->suAllocDelta += db->suPendAlloc;
+  pMeter->suLiveDelta += db->suPendLive;
+  db->suPendAlloc = 0;
+  db->suPendLive = 0;
+  for(i=0; i<db->nDb; i++){
+    pMeter->suAlloc += db->aDb[i].suAlloc;
+    pMeter->suLive += db->aDb[i].suLive;
+  }
+}
+#endif /* SQLITE_OMIT_TRACE */
+
+#ifndef SQLITE_OMIT_TRACE
+/*
+** Correct the allocated-storage figures after a commit has completed.
+**
+** A statement that frees space does not necessarily shrink the database file
+** during the statement itself: VACUUM rebuilds the file and auto-vacuum
+** truncates it, and both of those happen inside the commit, after
+** sqlite3VdbeMeterSampleStorage() has already run.  Re-reading the page count
+** here folds the truncation into the statement that caused it instead of
+** leaving it to be misattributed to whatever statement runs next.
+**
+** Only the "alloc" figures need this treatment.  Truncation only ever
+** discards free pages, so live storage is unchanged by it and the earlier
+** sample is already correct.
+**
+** sqlite3BtreeLastPage() reads a cached page count and needs only the btree
+** mutex, which the caller still holds, so this is safe after the transaction
+** has closed and page 1 has been released.
+*/
+void sqlite3VdbeMeterCommitStorage(Vdbe *p){
+  sqlite3 *db = p->db;
+  int i;
+  for(i=0; i<db->nDb; i++){
+    Db *pDb = &db->aDb[i];
+    Pager *pPager;
+    i64 suAlloc = 0;
+    if( pDb->pBt==0 || pDb->bSuValid==0 ) continue;
+    pPager = sqlite3BtreePager(pDb->pBt);
+
+    /* The cached page count is only refreshed when a transaction opens, so
+    ** after a VACUUM it still describes the pre-VACUUM file and is no use
+    ** here.  Ask the file itself instead.
+    **
+    ** That only works for a database that is its own file and up to date on
+    ** disk.  In WAL mode the database file lags the logical database until a
+    ** checkpoint, and a memory-backed database has no meaningful file size at
+    ** all, so for those the correction is skipped and the shrink is reported
+    ** by the next statement to sample this database.  No storage goes
+    ** unaccounted for either way; only the attribution of one delta moves. */
+    if( isWalMode(sqlite3PagerGetJournalMode(pPager))
+     || sqlite3PagerIsMemdb(pPager)
+     || sqlite3OsFileSize(sqlite3PagerFile(pPager), &suAlloc)!=SQLITE_OK
+     || suAlloc<=0
+    ){
+      pDb->bSuTxnValid = 0;
+      continue;
+    }
+    if( suAlloc!=pDb->suAlloc ){
+      p->meter.suAllocDelta += suAlloc - pDb->suAlloc;
+      pDb->suAlloc = suAlloc;
+    }
+
+    /* The transaction is over, so the next one starts from here. */
+    pDb->bSuTxnValid = 0;
+  }
+}
+#endif /* SQLITE_OMIT_TRACE */
+
 /*
 ** This routine is called the when a VDBE tries to halt.  If the VDBE
 ** has made changes and is in autocommit mode, then commit those
@@ -3359,6 +3562,13 @@ int sqlite3VdbeHalt(Vdbe *p){
 
     /* Lock all btrees used by the statement */
     sqlite3VdbeEnter(p);
+
+#ifndef SQLITE_OMIT_TRACE
+    /* Sample storage consumption now, while the transactions opened by this
+    ** statement are still live.  Once the commit or rollback below completes,
+    ** page 1 is no longer available to be read. */
+    if( p->bMeter ) sqlite3VdbeMeterSampleStorage(p);
+#endif
 
     /* Check for one of the special errors */
     if( p->rc ){
@@ -3444,6 +3654,11 @@ int sqlite3VdbeHalt(Vdbe *p){
           db->nDeferredImmCons = 0;
           db->flags &= ~(u64)SQLITE_DeferFKs;
           sqlite3CommitInternalChanges(db);
+#ifndef SQLITE_OMIT_TRACE
+          /* Attribute any file truncation performed by the commit to this
+          ** statement rather than to the next one. */
+          if( p->bMeter ) sqlite3VdbeMeterCommitStorage(p);
+#endif
         }
       }else if( p->rc==SQLITE_SCHEMA && db->nVdbeActive>1 ){
         p->nChange = 0;
@@ -3473,6 +3688,15 @@ int sqlite3VdbeHalt(Vdbe *p){
     */
     if( eStatementOp ){
       rc = sqlite3VdbeCloseStatement(p, eStatementOp);
+#ifndef SQLITE_OMIT_TRACE
+      /* A statement-level rollback undoes page allocations that the storage
+      ** sample taken above has already counted.  The surrounding transaction
+      ** is still open here, so the reverted state can simply be re-sampled;
+      ** the delta that the sample above contributed is cancelled out. */
+      if( rc==SQLITE_OK && p->bMeter && eStatementOp==SAVEPOINT_ROLLBACK ){
+        sqlite3VdbeMeterSampleStorage(p);
+      }
+#endif
       if( rc ){
         if( p->rc==SQLITE_OK || (p->rc&0xff)==SQLITE_CONSTRAINT ){
           p->rc = rc;

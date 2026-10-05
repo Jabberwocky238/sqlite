@@ -488,6 +488,8 @@ struct Vdbe {
   VList *pVList;          /* Name of variables */
 #ifndef SQLITE_OMIT_TRACE
   i64 startTime;          /* Time when query started - used for profiling */
+  i64 aMeterBase[3];      /* VM_STEP/page-read/page-write at start of run */
+  sqlite3_meter meter;    /* Resource usage accumulated during this run */
 #endif
 #ifdef SQLITE_DEBUG
   int rcApp;              /* errcode set by sqlite3_result_error_code() */
@@ -500,6 +502,9 @@ struct Vdbe {
   u8 minWriteFileFormat;  /* Minimum file format for writable database files */
   u8 prepFlags;           /* SQLITE_PREPARE_* flags */
   u8 eVdbeState;          /* On of the VDBE_*_STATE values */
+#ifndef SQLITE_OMIT_TRACE
+  u8 bMeter;              /* True if this run is being metered */
+#endif
   bft expired:2;          /* 1: recompile VM immediately  2: when convenient */
   bft explain:2;          /* 0: normal, 1: EXPLAIN, 2: EXPLAIN QUERY PLAN */
   bft changeCntOn:1;      /* True to update the change-counter */
@@ -636,6 +641,12 @@ char *sqlite3VdbeDisplayComment(sqlite3*,const Op*,const char*);
 int sqlite3VdbeList(Vdbe*);
 #endif
 int sqlite3VdbeHalt(Vdbe*);
+#ifndef SQLITE_OMIT_TRACE
+void sqlite3VdbeMeterBegin(Vdbe*);
+void sqlite3VdbeMeterSampleStorage(Vdbe*);
+void sqlite3VdbeMeterCommitStorage(Vdbe*);
+void sqlite3VdbeMeterFinish(Vdbe*);
+#endif
 int sqlite3VdbeChangeEncoding(Mem *, int);
 int sqlite3VdbeMemTooBig(Mem*);
 int sqlite3VdbeMemCopy(Mem*, const Mem*);

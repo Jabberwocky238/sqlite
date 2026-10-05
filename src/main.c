@@ -1539,6 +1539,9 @@ void sqlite3RollbackAll(sqlite3 *db, int tripCode){
     }
   }
   sqlite3VtabRollback(db);
+#ifndef SQLITE_OMIT_TRACE
+  sqlite3MeterRollback(db);
+#endif
   sqlite3EndBenignMalloc();
 
   if( schemaChange ){

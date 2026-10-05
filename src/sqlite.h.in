@@ -3612,6 +3612,65 @@ SQLITE_DEPRECATED void *sqlite3_profile(sqlite3*,
    void(*xProfile)(void*,const char*,sqlite3_uint64), void*);
 
 /*
+** CAPI3REF: Statement Resource Metering Report
+**
+** An instance of this object is passed as the X argument of an
+** [SQLITE_TRACE_METER] callback.  It reports the compute and storage
+** resources attributable to the [prepared statement] that just finished.
+**
+** Compute is reported as a weighted "compute unit" count in the cu field,
+** together with the raw components from which it is derived.  The weights
+** are the SQLITE_CU_WEIGHT_VMSTEP, SQLITE_CU_WEIGHT_PAGEREAD and
+** SQLITE_CU_WEIGHT_PAGEWRITE compile-time options, so an application that
+** prefers a different cost model can recompute cu from nVmStep, nPageRead
+** and nPageWrite instead of using the cu field directly.
+**
+** Storage is reported in bytes, in two flavors.  The "alloc" flavor counts
+** every page in the database file, including pages sitting on the freelist.
+** The "live" flavor counts only pages that hold data, so that a DELETE
+** shows up immediately as a negative suLiveDelta while suAllocDelta stays
+** zero until the freed space is reclaimed by [VACUUM].  Both totals sum
+** over the main database and every [ATTACH|attached] database.
+**
+** The delta fields are signed and may be negative.  Storage is only sampled
+** for databases in which the statement held an open transaction, so the
+** first metered statement to touch a database establishes that database's
+** baseline and reports zero delta for it.
+**
+** Work that is rolled back is charged for compute but not for storage.  A
+** statement that fails, or whose transaction is later rolled back, has
+** really executed, so its nVmStep and page I/O counts stand and its cu is
+** charged in full.  The storage it claimed never became durable, so the
+** [ROLLBACK] hands it back: the statement that performs the rollback reports
+** a delta that returns storage to what it was when the transaction began.
+** Summing suAllocDelta or suLiveDelta over every metered statement therefore
+** always tracks the database's real size.
+**
+** Attribution of a single storage delta can move to the statement that
+** follows the one responsible.  This happens when a statement is abandoned
+** part way through, by calling [sqlite3_reset()] after [sqlite3_step()] has
+** returned [SQLITE_ROW], and when a [VACUUM] shrinks a database that is in
+** [WAL mode] or held in memory, where the new size cannot be read until the
+** next transaction opens.  Running totals stay correct either way.
+**
+** Page reads and writes are counted by the pager, which does not know which
+** statement asked for them, so a connection that interleaves [sqlite3_step()]
+** calls on two statements will charge I/O to whichever of them finishes
+** first.  The nVmStep count is kept per statement and is always exact.
+*/
+typedef struct sqlite3_meter sqlite3_meter;
+struct sqlite3_meter {
+  sqlite3_int64 cu;            /* Weighted compute units consumed */
+  sqlite3_int64 nVmStep;       /* Virtual machine instructions executed */
+  sqlite3_int64 nPageRead;     /* Pages read from disk */
+  sqlite3_int64 nPageWrite;    /* Pages written to disk */
+  sqlite3_int64 suAlloc;       /* Allocated storage afterwards, in bytes */
+  sqlite3_int64 suAllocDelta;  /* Change in allocated storage, may be <0 */
+  sqlite3_int64 suLive;        /* Live storage afterwards, in bytes */
+  sqlite3_int64 suLiveDelta;   /* Change in live storage, may be <0 */
+};
+
+/*
 ** CAPI3REF: SQL Trace Event Codes
 ** KEYWORDS: SQLITE_TRACE
 **
@@ -3661,12 +3720,22 @@ SQLITE_DEPRECATED void *sqlite3_profile(sqlite3*,
 ** connection closes.
 ** ^The P argument is a pointer to the [database connection] object
 ** and the X argument is unused.
+**
+** [[SQLITE_TRACE_METER]] <dt>SQLITE_TRACE_METER</dt>
+** <dd>^An SQLITE_TRACE_METER callback is invoked when a prepared statement
+** finishes, after the statement's transaction, if any, has been accounted
+** for.  ^The P argument is a pointer to the [prepared statement] and the
+** X argument is a pointer to an [sqlite3_meter] object describing the
+** compute and storage resources that the statement consumed.
+** ^The [sqlite3_meter] object is only valid for the duration of the
+** callback.
 ** </dl>
 */
 #define SQLITE_TRACE_STMT       0x01
 #define SQLITE_TRACE_PROFILE    0x02
 #define SQLITE_TRACE_ROW        0x04
 #define SQLITE_TRACE_CLOSE      0x08
+#define SQLITE_TRACE_METER      0x10
 
 /*
 ** CAPI3REF: SQL Trace Hook

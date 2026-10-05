@@ -4534,6 +4534,8 @@ static const char *(azHelp[]) = {
   "    --profile               Profile statements (SQLITE_TRACE_PROFILE)",
   "    --row                   Trace each row (SQLITE_TRACE_ROW)",
   "    --close                 Trace connection close (SQLITE_TRACE_CLOSE)",
+  "    --meter                 Report compute and storage use "
+                              "(SQLITE_TRACE_METER)",
 #endif /* SQLITE_OMIT_TRACE */
 #ifdef SQLITE_DEBUG
   ".unmodule NAME ...       Unregister virtual table modules",
@@ -5522,7 +5524,8 @@ static int sql_trace_callback(
     sputz(p->traceOut, "-- closing database connection\n");
     return 0;
   }
-  if( mType!=SQLITE_TRACE_ROW && pX!=0 && ((const char*)pX)[0]=='-' ){
+  if( mType!=SQLITE_TRACE_ROW && mType!=SQLITE_TRACE_METER
+   && pX!=0 && ((const char*)pX)[0]=='-' ){
     zSql = (const char*)pX;
   }else{
     pStmt = (sqlite3_stmt*)pP;
@@ -5557,6 +5560,19 @@ static int sql_trace_callback(
       sqlite3_int64 nNanosec = pX ? *(sqlite3_int64*)pX : 0;
       cli_printf(p->traceOut,
                       "%.*s; -- %lld ns\n", (int)nSql, zSql, nNanosec);
+      break;
+    }
+    case SQLITE_TRACE_METER: {
+      const sqlite3_meter *pM = (const sqlite3_meter*)pX;
+      if( pM==0 ) break;
+      cli_printf(p->traceOut, "%.*s;\n"
+                 "  -- cu %lld (vm %lld, read %lld, write %lld)\n"
+                 "  -- su live %+lld -> %lld, alloc %+lld -> %lld\n",
+                 (int)nSql, zSql,
+                 (sqlite3_int64)pM->cu, (sqlite3_int64)pM->nVmStep,
+                 (sqlite3_int64)pM->nPageRead, (sqlite3_int64)pM->nPageWrite,
+                 (sqlite3_int64)pM->suLiveDelta, (sqlite3_int64)pM->suLive,
+                 (sqlite3_int64)pM->suAllocDelta, (sqlite3_int64)pM->suAlloc);
       break;
     }
   }
@@ -13054,6 +13070,9 @@ static int do_meta_command(const char *zLine, ShellState *p){
         }
         else if( optionMatch(z, "close") ){
           mType |= SQLITE_TRACE_CLOSE;
+        }
+        else if( optionMatch(z, "meter") ){
+          mType |= SQLITE_TRACE_METER;
         }
         else {
           cli_printf(stderr,"Unknown option \"%s\" on \".trace\"\n", z);

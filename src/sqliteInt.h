@@ -1513,6 +1513,12 @@ struct Db {
   Btree *pBt;          /* The B*Tree structure for this database file */
   u8 safety_level;     /* How aggressive at syncing data to disk */
   u8 bSyncSet;         /* True if "PRAGMA synchronous=N" has been run */
+  u8 bSuValid;         /* True once suAlloc/suLive hold a measured baseline */
+  u8 bSuTxnValid;      /* True once suAllocTxn/suLiveTxn hold a baseline */
+  i64 suAlloc;         /* Bytes of allocated storage as of the last sample */
+  i64 suLive;          /* Bytes of live storage as of the last sample */
+  i64 suAllocTxn;      /* suAlloc as of the start of the open transaction */
+  i64 suLiveTxn;       /* suLive as of the start of the open transaction */
   Schema *pSchema;     /* Pointer to database schema (possibly shared) */
 };
 
@@ -1685,7 +1691,25 @@ typedef int (*sqlite3_xauth)(void*,int,const char*,const char*,const char*,
 #define SQLITE_TRACE_LEGACY          0
 #define SQLITE_TRACE_XPROFILE        0
 #endif /* SQLITE_OMIT_DEPRECATED */
-#define SQLITE_TRACE_NONLEGACY_MASK  0x0f     /* Normal flags */
+#define SQLITE_TRACE_NONLEGACY_MASK  0x1f     /* Normal flags */
+
+/*
+** The cost model behind the cu field of an sqlite3_meter object.  A compute
+** unit is a weighted sum of virtual machine instructions and page I/O.  The
+** defaults treat one page read as worth 100 instructions and one page write
+** as worth 200, on the grounds that I/O, not bytecode, dominates the real
+** cost of a query.  Redefine these to bill against a different model.
+*/
+#ifndef SQLITE_CU_WEIGHT_VMSTEP
+# define SQLITE_CU_WEIGHT_VMSTEP     1
+#endif
+#ifndef SQLITE_CU_WEIGHT_PAGEREAD
+# define SQLITE_CU_WEIGHT_PAGEREAD   100
+#endif
+#ifndef SQLITE_CU_WEIGHT_PAGEWRITE
+# define SQLITE_CU_WEIGHT_PAGEWRITE  200
+#endif
+
 
 /*
 ** Maximum number of sqlite3.aDb[] entries.  This is the number of attached
@@ -1725,6 +1749,8 @@ struct sqlite3 {
   u8 vtabOnConflict;            /* Value to return for s3_vtab_on_conflict() */
   u8 isTransactionSavepoint;    /* True if the outermost savepoint is a TS */
   u8 mTrace;                    /* zero or more SQLITE_TRACE flags */
+  i64 suPendAlloc;              /* Storage compensation owed by a rollback */
+  i64 suPendLive;               /* Storage compensation owed by a rollback */
   u8 noSharedCache;             /* True if no shared-cache backends */
   u8 nSqlExec;                  /* Number of pending OP_SqlExec opcodes */
   u8 eOpenState;                /* Current condition of the connection */
@@ -5272,6 +5298,9 @@ void sqlite3PrngSaveState(void);
 void sqlite3PrngRestoreState(void);
 #endif
 void sqlite3RollbackAll(sqlite3*,int);
+#ifndef SQLITE_OMIT_TRACE
+void sqlite3MeterRollback(sqlite3*);
+#endif
 void sqlite3CodeVerifySchema(Parse*, int);
 void sqlite3CodeVerifyNamedSchema(Parse*, const char *zDb);
 void sqlite3BeginTransaction(Parse*, int);

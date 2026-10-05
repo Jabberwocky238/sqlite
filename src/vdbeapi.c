@@ -62,35 +62,44 @@ static int vdbeSafetyNotNull(Vdbe *p){
 
 #ifndef SQLITE_OMIT_TRACE
 /*
-** Invoke the profile callback.  This routine is only called if we already
-** know that the profile callback is defined and needs to be invoked.
+** Invoke whichever of the end-of-statement callbacks are armed for this run:
+** the profile callback if p was timed, the meter callback if p was metered.
+** Only called when we already know at least one of them is needed.
 */
-static SQLITE_NOINLINE void invokeProfileCallback(sqlite3 *db, Vdbe *p){
-  sqlite3_int64 iNow;
-  sqlite3_int64 iElapse;
-  assert( p->startTime>0 );
+static SQLITE_NOINLINE void invokeStmtEndCallbacks(sqlite3 *db, Vdbe *p){
   assert( db->init.busy==0 );
   assert( p->zSql!=0 );
-  sqlite3OsCurrentTimeInt64(db->pVfs, &iNow);
-  iElapse = (iNow - p->startTime)*1000000;
+  if( p->startTime>0 ){
+    sqlite3_int64 iNow;
+    sqlite3_int64 iElapse;
+    sqlite3OsCurrentTimeInt64(db->pVfs, &iNow);
+    iElapse = (iNow - p->startTime)*1000000;
 #ifndef SQLITE_OMIT_DEPRECATED
-  if( db->xProfile ){
-    db->xProfile(db->pProfileArg, p->zSql, iElapse);
-  }
+    if( db->xProfile ){
+      db->xProfile(db->pProfileArg, p->zSql, iElapse);
+    }
 #endif
-  if( db->mTrace & SQLITE_TRACE_PROFILE ){
-    db->trace.xV2(SQLITE_TRACE_PROFILE, db->pTraceArg, p, (void*)&iElapse);
+    if( db->mTrace & SQLITE_TRACE_PROFILE ){
+      db->trace.xV2(SQLITE_TRACE_PROFILE, db->pTraceArg, p, (void*)&iElapse);
+    }
+    p->startTime = 0;
   }
-  p->startTime = 0;
+  if( p->bMeter ){
+    sqlite3VdbeMeterFinish(p);
+    if( db->mTrace & SQLITE_TRACE_METER ){
+      db->trace.xV2(SQLITE_TRACE_METER, db->pTraceArg, p, (void*)&p->meter);
+    }
+    p->bMeter = 0;
+  }
 }
 /*
-** The checkProfileCallback(DB,P) macro checks to see if a profile callback
-** is needed, and it invokes the callback if it is needed.
+** The checkStmtEndCallbacks(DB,P) macro checks to see if an end-of-statement
+** callback is needed, and it invokes the callbacks if one is.
 */
-# define checkProfileCallback(DB,P) \
-   if( ((P)->startTime)>0 ){ invokeProfileCallback(DB,P); }
+# define checkStmtEndCallbacks(DB,P) \
+   if( ((P)->startTime)>0 || (P)->bMeter ){ invokeStmtEndCallbacks(DB,P); }
 #else
-# define checkProfileCallback(DB,P)  /*no-op*/
+# define checkStmtEndCallbacks(DB,P)  /*no-op*/
 #endif
 
 /*
@@ -113,7 +122,7 @@ int sqlite3_finalize(sqlite3_stmt *pStmt){
     sqlite3 *db = v->db;
     if( vdbeSafety(v) ) return SQLITE_MISUSE_BKPT;
     sqlite3_mutex_enter(db->mutex);
-    checkProfileCallback(db, v);
+    checkStmtEndCallbacks(db, v);
     assert( v->eVdbeState>=VDBE_READY_STATE );
     rc = sqlite3VdbeReset(v);
     sqlite3VdbeDelete(v);
@@ -139,7 +148,7 @@ int sqlite3_reset(sqlite3_stmt *pStmt){
     Vdbe *v = (Vdbe*)pStmt;
     sqlite3 *db = v->db;
     sqlite3_mutex_enter(db->mutex);
-    checkProfileCallback(db, v);
+    checkStmtEndCallbacks(db, v);
     rc = sqlite3VdbeReset(v);
     sqlite3VdbeRewind(v);
     assert( (rc & (db->errMask))==rc );
@@ -871,9 +880,15 @@ static int sqlite3Step(Vdbe *p){
       );
 
 #ifndef SQLITE_OMIT_TRACE
-      if( (db->mTrace & (SQLITE_TRACE_PROFILE|SQLITE_TRACE_XPROFILE))!=0
-          && !db->init.busy && p->zSql ){
-        sqlite3OsCurrentTimeInt64(db->pVfs, &p->startTime);
+      if( !db->init.busy && p->zSql ){
+        if( (db->mTrace & (SQLITE_TRACE_PROFILE|SQLITE_TRACE_XPROFILE))!=0 ){
+          sqlite3OsCurrentTimeInt64(db->pVfs, &p->startTime);
+        }else{
+          assert( p->startTime==0 );
+        }
+        if( (db->mTrace & SQLITE_TRACE_METER)!=0 ){
+          sqlite3VdbeMeterBegin(p);
+        }
       }else{
         assert( p->startTime==0 );
       }
@@ -938,8 +953,8 @@ static int sqlite3Step(Vdbe *p){
     return SQLITE_ROW;
   }else{
 #ifndef SQLITE_OMIT_TRACE
-    /* If the statement completed successfully, invoke the profile callback */
-    checkProfileCallback(db, p);
+    /* The statement is finished.  Invoke the end-of-statement callbacks. */
+    checkStmtEndCallbacks(db, p);
 #endif
     p->pResultRow = 0;
     if( rc==SQLITE_DONE && db->autoCommit ){
